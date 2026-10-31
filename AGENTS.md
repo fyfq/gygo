@@ -176,18 +176,17 @@ git diff --cached --stat    # 单次 diff 控制在 300 行内
 - **MINOR**：新功能，或 schema 变更但启动时自动迁移
 - **PATCH**：bug 修复、文案、依赖小版本
 
-**推荐流程**：到 Actions → "Build & Push Docker Image" → Run workflow → 选 `purpose=patch/minor/major`，CI 会计算下一个版本号、构建 sha 镜像、推 tag 并 promote 到 `latest`；全程一次构建。手动 `git tag -a v* && git push --tags` 也允许，但 tag 早于 sha 镜像就位时 `release` 会回退到全量构建。
+日常提交靠 `main`/`sha-<7>`/`latest` 三条 tag 覆盖，semver tag 只在里程碑/需要固定版本部署时手动 `git tag -a v*` 打。
 
 ### 镜像 tag
 
 | 触发 | 产出 | 说明 |
 |---|---|---|
-| main（CI 通过后） | `main`、`sha-<7>` | 由 `workflow_run` 在 CI 成功后触发，失败提交不产出镜像；不动 `latest` |
-| push `v*` | `v2.1.0`、`2.1`、`latest` | 复制 main 已构建的 `sha-<7>`，不重复构建；缺镜像才回退完整构建；`latest` 只由正式 tag 推进 |
-| dispatch `purpose=edge` | `edge` | 临时验证，可随时覆盖；不动 `latest` |
-| dispatch `purpose=patch/minor/major` | 自动打 tag + `v*` / `<minor>` / `latest` | 一键发版：先构建 `sha-<7>`，再计算下一 tag、推送，`release` 走 promote 复用镜像 |
+| main（CI 通过后） | `main`、`sha-<7>`、`latest` | 由 `workflow_run` 在 CI 成功后触发；失败提交不产出镜像；`latest` 每次绿的 main 自动推进 |
+| 手动 `git push v*` | `v2.1.0`、`2.1` | 复制 `sha-<7>`（秒级），不重建；缺镜像才回退完整构建；顺带刷新 latest |
+| 手动 dispatch | `edge` | 临时验证，可随时覆盖；不动 `latest` |
 
-部署固定版本号（`ghcr.io/fyfq/gygo:v2.1.0`），回滚只改这一行；拉 `latest` 等于"最近一次正式发版"。
+日常部署直接拉 `latest`；需要固定版本、跨环境一致性时切 `v<MAJOR>.<MINOR>.<PATCH>`，回滚改这一行即可。
 
 ### 构建触发
 

@@ -18,17 +18,6 @@ on:
       - 'LICENSE'
       - '.gitignore'
   workflow_dispatch:
-    inputs:
-      purpose:
-        description: 用途
-        type: choice
-        required: true
-        default: edge
-        options:
-          - edge
-          - patch
-          - minor
-          - major
 
 # 同一 ref 重复推送时取消上一次未完成的构建，避免并发占满 runner
 concurrency:
@@ -40,8 +29,9 @@ env:
   IMAGE_NAME: ${{ github.repository }}
 
 jobs:
-  # main 推送（CI 通过后）与手动触发：完整构建多架构镜像，产出 main / sha-<7> / edge。
-  # 这些镜像不覆盖 latest，latest 只由正式发版 tag 推进。
+  # main 推送（CI 通过后）与手动触发：完整构建多架构镜像。
+  # workflow_run（CI 绿的 main）→ 打 main / sha-<7> / latest；latest 就是最近一次绿的 main。
+  # workflow_dispatch → 只打 edge（sha-<7>/main 也顺带产出，但不动 latest）。
   build:
     if: ${{ github.event_name == 'workflow_dispatch' || (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success') }}
     runs-on: ubuntu-latest
@@ -79,7 +69,8 @@ jobs:
           tags: |
             type=ref,event=branch
             type=sha,prefix=sha-
-            type=raw,value=edge,enable=${{ github.event_name == 'workflow_dispatch' && inputs.purpose == 'edge' }}
+            type=raw,value=edge,enable=${{ github.event_name == 'workflow_dispatch' }}
+            type=raw,value=latest,enable=${{ github.event_name == 'workflow_run' }}
 
       - name: Build & push
         uses: docker/build-push-action@v6
@@ -90,7 +81,7 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           build-args: |
-            VERSION=${{ (github.event_name == 'workflow_dispatch' && inputs.purpose == 'edge') && 'edge' || 'main' }}
+            VERSION=${{ github.event_name == 'workflow_dispatch' && 'edge' || 'main' }}
             COMMIT=${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || github.sha }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
@@ -177,67 +168,3 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-  # workflow_dispatch + purpose∈{patch,minor,major}：先按已有 tag 算下一个版本号。
-  # 结果通过 outputs 传给 create-tag，避免和手动打的 tag 撞车。
-  resolve-tag:
-    if: ${{ github.event_name == 'workflow_dispatch' && inputs.purpose != 'edge' }}
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-    outputs:
-      next_tag: ${{ steps.compute.outputs.next_tag }}
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - name: Compute next semver tag
-        id: compute
-        env:
-          PURPOSE: ${{ inputs.purpose }}
-        run: |
-          set -euo pipefail
-          last=$(git tag --sort=-v:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -1 || true)
-          if [ -z "$last" ]; then
-            next="v0.1.0"
-          else
-            ver="${last#v}"
-            IFS=. read -r major minor patch <<<"$ver"
-            case "$PURPOSE" in
-              major) major=$((major+1)); minor=0; patch=0 ;;
-              minor) minor=$((minor+1)); patch=0 ;;
-              patch) patch=$((patch+1)) ;;
-              *) echo "unknown purpose: $PURPOSE" >&2; exit 1 ;;
-            esac
-            next="v${major}.${minor}.${patch}"
-          fi
-          echo "next_tag=$next" >> "$GITHUB_OUTPUT"
-          echo "上一个 tag：${last:-<无>} → 下一个：$next"
-
-  # build 与 resolve-tag 都完成后再推 tag，确保 sha-<7> 镜像已就位，
-  # 后续 release job 走 promote（复制）而不是回退全量构建。
-  create-tag:
-    needs: [build, resolve-tag]
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          persist-credentials: true
-
-      - name: Push annotated tag
-        env:
-          NEXT_TAG: ${{ needs.resolve-tag.outputs.next_tag }}
-          PURPOSE: ${{ inputs.purpose }}
-          SHA: ${{ github.sha }}
-        run: |
-          set -euo pipefail
-          if git ls-remote --exit-code --tags origin "refs/tags/$NEXT_TAG" >/dev/null 2>&1; then
-            echo "tag $NEXT_TAG 已存在，请先处理冲突" >&2
-            exit 1
-          fi
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git tag -a "$NEXT_TAG" -m "release: cut $NEXT_TAG via workflow_dispatch (purpose=$PURPOSE, sha=${SHA:0:7})" "$SHA"
-          git push origin "refs/tags/$NEXT_TAG"
